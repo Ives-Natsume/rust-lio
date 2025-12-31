@@ -3,37 +3,214 @@
 //! Use Proto for data transmittion
 //! 
 //! Receives data from bridges implementing `SlamBridge` trait
-use std::sync::Arc;
+use std::io::{Cursor, Read};
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
-use prost::Message;
-use super::slam_proto::*;
+use byteorder::{LittleEndian, ReadBytesExt};
+use crate::utils::structs::*;
+use nalgebra::Vector3;
 
 #[async_trait::async_trait]
 pub trait SlamBridge: Send + Sync {
-    async fn next_packet(&mut self) -> anyhow::Result<SensorPacket>;
+    async fn next_packet(&mut self) -> anyhow::Result<MeasureGroup>;
+}
+
+enum RawPacket {
+    Lidar(PointCloudXYZI),
+    Imu(ImuData),
 }
 
 pub struct UdpBridge {
-    socket: UdpSocket,
-    buffer: [u8; 65535], // Max UDP size
+    lidar_socket: UdpSocket,
+    imu_socket: UdpSocket,
+    lidar_recv_buffer: [u8; 65535], // Max UDP size
+    imu_recv_buffer: [u8; 65535], // Max UDP size
+    imu_buffer: Vec<ImuData>,
+    lidar_buffer: Vec<PointCloudXYZI>,
 }
 
 impl UdpBridge {
-    pub async fn new(bind_addr: &str) -> anyhow::Result<Self> {
-        let socket = UdpSocket::bind(bind_addr).await?;
+    pub async fn new(lidar_bind_addr: &str, imu_bind_addr: &str) -> anyhow::Result<Self> {
+        let lidar_socket = UdpSocket::bind(lidar_bind_addr).await?;
+        let imu_socket = UdpSocket::bind(imu_bind_addr).await?;
         Ok(UdpBridge {
-            socket,
-            buffer: [0u8; 65535],
+            lidar_socket,
+            imu_socket,
+            lidar_recv_buffer: [0u8; 65535],
+            imu_recv_buffer: [0u8; 65535],
+            imu_buffer: Vec::new(),
+            lidar_buffer: Vec::new(),
         })
     }
 }
 
 #[async_trait::async_trait]
 impl SlamBridge for UdpBridge {
-    async fn next_packet(&mut self) -> anyhow::Result<SensorPacket> {
-        let (len, _addr) = self.socket.recv_from(&mut self.buffer).await?;
-        let packet = SensorPacket::decode(&self.buffer[..len])?;
-        Ok(packet)
+    async fn next_packet(&mut self) -> anyhow::Result<MeasureGroup> {
+        loop {
+            let mut packet_type = None;
+            
+            tokio::select! {
+                res = self.lidar_socket.recv_from(&mut self.lidar_recv_buffer) => {
+                    let (len, _) = res?;
+                    match rawdata_decoder(&self.lidar_recv_buffer[..len]) {
+                        Ok(RawPacket::Lidar(cloud)) => {
+                            self.lidar_buffer.push(cloud);
+                            packet_type = Some("lidar");
+                        },
+                        Ok(_) => {},
+                        Err(e) => tracing::warn!("Lidar decode error: {}", e),
+                    }
+                }
+                res = self.imu_socket.recv_from(&mut self.imu_recv_buffer) => {
+                    let (len, _) = res?;
+                    match rawdata_decoder(&self.imu_recv_buffer[..len]) {
+                        Ok(RawPacket::Imu(imu)) => {
+                            self.imu_buffer.push(imu);
+                        },
+                        Ok(_) => {},
+                        Err(e) => tracing::warn!("IMU decode error: {}", e),
+                    }
+                }
+            }
+
+            // MeasureGroup package
+            if let Some("lidar") = packet_type {
+                if let (Some(first), Some(last)) = (self.lidar_buffer.first(), self.lidar_buffer.last()) {
+                    let duration = last.timestamp - first.timestamp;
+                    if duration >= 0.1 { // 100ms frame
+                        // Construct MeasureGroup
+                        let lidar_begin_time = first.timestamp;
+                        let lidar_end_time = last.timestamp;
+                        
+                        let mut all_points = Vec::new();
+                        for cloud in self.lidar_buffer.drain(..) {
+                            all_points.extend(cloud.points);
+                        }
+                        let points = PointCloudXYZI::from_points(all_points, lidar_end_time); // Use end time as frame time?
+
+                        // Extract relevant IMU data
+                        // We need IMU data covering [begin_time, end_time]
+                        // Ideally slightly more for interpolation
+                        let mut frame_imus = Vec::new();
+                        let mut remaining_imus = Vec::new();
+                        
+                        for imu in self.imu_buffer.drain(..) {
+                            if imu.timestamp < lidar_begin_time - 0.01 {
+                                // Too old, discard
+                                continue;
+                            } else if imu.timestamp <= lidar_end_time + 0.01 {
+                                frame_imus.push(imu);
+                            } else {
+                                // Future data, keep for next frame
+                                remaining_imus.push(imu);
+                            }
+                        }
+                        self.imu_buffer = remaining_imus;
+                        // TODO: Consider adding boundary IMU data for better interpolation
+
+                        return Ok(MeasureGroup {
+                            lidar_begin_time,
+                            lidar_end_time,
+                            points,
+                            imus: frame_imus,
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Decode raw lidar UDP data into RawPacket
+/// 
+/// Doc: [Livox Mid360 UDP Protocol](https://livox-wiki-en.readthedocs.io/en/latest/tutorials/new_product/mid360/livox_eth_protocol_mid360.html#protocol-format)
+fn rawdata_decoder(data: &[u8]) -> anyhow::Result<RawPacket> {
+    const HEADER_SIZE: usize = 36;
+    const POINT_SIZE: usize = 14;
+
+    if data.len() < HEADER_SIZE {
+        return Err(anyhow::anyhow!("Data too short for header"));
+    }
+
+    let mut cursor = Cursor::new(data);
+
+    let _version = cursor.read_u8()?;                            // 0: 协议版本
+    let length = cursor.read_u16::<LittleEndian>()?;            // 1-2: UDP 包长度
+    let _time_interval = cursor.read_u16::<LittleEndian>()?;    // 3-4: 时间间隔
+    let dot_num = cursor.read_u16::<LittleEndian>()?;           // 5-6: data包含点云数量
+    let _udp_cnt = cursor.read_u16::<LittleEndian>()?;          // 7-8: UDP包计数
+    let _frame_cnt = cursor.read_u8()?;                          // 9: 帧计数
+    let data_type = cursor.read_u8()?;                           // 10: 数据类型
+    let _time_type = cursor.read_u8()?;                          // 11: 时间戳类型
+
+    // 12-23: 保留字段 - 读取12字节
+    let mut reserved = vec![0u8; 12];
+    cursor.read_exact(&mut reserved)?;
+
+    let _crc32 = cursor.read_u32::<LittleEndian>()?;            // 24-27: CRC32校验码
+    let timestamp = cursor.read_u64::<LittleEndian>()?;         // 28-35: 时间戳
+    let timestamp_sec = timestamp as f64 * 1e-9;
+
+    let length_usize = length as usize;
+    if data.len() < length_usize {
+        return Err(anyhow::anyhow!("Data too short for payload"));
+    }
+
+    let payload = &data[HEADER_SIZE..length_usize];
+    let mut payload_cursor = Cursor::new(payload);
+
+    match data_type {
+        0x01 => {
+            // Lidar Data
+            if payload.len() != dot_num as usize * POINT_SIZE {
+                return Err(anyhow::anyhow!("Payload size does not match point count"));
+            }
+            
+            let mut points = Vec::with_capacity(dot_num as usize);
+            let minimum_distance = 0.1f32;
+
+            for _ in 0..dot_num {
+                let x = payload_cursor.read_f32::<LittleEndian>()?;
+                let y = payload_cursor.read_f32::<LittleEndian>()?;
+                let z = payload_cursor.read_f32::<LittleEndian>()?;
+                let intensity = payload_cursor.read_u8()? as f32;
+                let _tag = payload_cursor.read_u8()?;
+
+                if x.abs() < minimum_distance && y.abs() < minimum_distance && z.abs() < minimum_distance {
+                    continue;
+                }
+
+                points.push(PointXYZI {
+                    pos: nalgebra::Vector3::new(x, y, z),
+                    intensity,
+                });
+            }
+            
+            let pointcloud = PointCloudXYZI::from_points(points, timestamp_sec);
+            
+            Ok(RawPacket::Lidar(pointcloud))
+        },
+        0x00 => {
+            // IMU Data
+            if payload.len() < 24 {
+                 return Err(anyhow::anyhow!("Payload too short for IMU data"));
+            }
+
+            let gyr_x = payload_cursor.read_f32::<LittleEndian>()?;
+            let gyr_y = payload_cursor.read_f32::<LittleEndian>()?;
+            let gyr_z = payload_cursor.read_f32::<LittleEndian>()?;
+            let acc_x = payload_cursor.read_f32::<LittleEndian>()?;
+            let acc_y = payload_cursor.read_f32::<LittleEndian>()?;
+            let acc_z = payload_cursor.read_f32::<LittleEndian>()?;
+
+            Ok(RawPacket::Imu(ImuData {
+                timestamp: timestamp_sec,
+                acc: Vector3::new(acc_x as f64, acc_y as f64, acc_z as f64),
+                gyr: Vector3::new(gyr_x as f64, gyr_y as f64, gyr_z as f64),
+            }))
+        },
+        _ => {
+            Err(anyhow::anyhow!("Unknown or not supported data type: {}", data_type))
+        }
     }
 }

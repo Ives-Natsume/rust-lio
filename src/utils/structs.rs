@@ -20,7 +20,7 @@ pub struct RosPose6D {
 /// 
 /// a.k.a [`pcl::PointXYZINormal`](https://pointclouds.org/documentation/structpcl_1_1_point_x_y_z_i_normal.html)
 /// 
-/// [`PointXYZIProto`](crate::io::slam_proto::PointXYZIProto) differs from this struct in field definitions.
+/// [Livox Point Cloud Data Format](https://livox-wiki-en.readthedocs.io/en/latest/tutorials/new_product/mid360/livox_eth_protocol_mid360.html#point-cloud-imu-data-protocol)
 pub struct PointXYZI {
     pub pos: nalgebra::Vector3<f32>,
     pub intensity: f32,
@@ -30,6 +30,7 @@ pub struct PointXYZI {
 ///
 /// a.k.a [`pcl::PointCloud<PointXYZINormal>`](https://pointclouds.org/documentation/classpcl_1_1_point_cloud.html)
 pub struct PointCloudXYZI {
+    pub timestamp: f64,             // timestamp of the point cloud (seconds)
     pub width: u32,                 // number of points per row
     pub height: u32,                // number of rows
     pub points: Vec<PointXYZI>,     // point data
@@ -39,6 +40,7 @@ pub struct PointCloudXYZI {
 impl PointCloudXYZI {
     pub fn new() -> Self {
         PointCloudXYZI {
+            timestamp: 0.0,
             width: 0,
             height: 0,
             points: Vec::new(),
@@ -49,9 +51,10 @@ impl PointCloudXYZI {
     /// Create a PointCloudXYZI from a vector of PointType
     /// 
     /// For Lidar usage (unorganized point cloud), height is set to 1
-    pub fn from_points(points: Vec<PointXYZI>) -> Self {
+    pub fn from_points(points: Vec<PointXYZI>, timestamp: f64) -> Self {
         let num_points = points.len() as u32;
         PointCloudXYZI {
+            timestamp,
             width: num_points,
             height: 1,
             points,
@@ -66,9 +69,19 @@ impl PointCloudXYZI {
 
 pub type PointVector = Vec<PointXYZI>;
 
+/// IMU data structure
+/// 
+/// [Livox IMU Data Format](https://livox-wiki-en.readthedocs.io/en/latest/tutorials/new_product/mid360/livox_eth_protocol_mid360.html#point-cloud-imu-data-protocol)
+#[derive(Clone, Debug)]
+pub struct ImuData {
+    pub timestamp: f64,
+    pub acc: Vector3<f64>,
+    pub gyr: Vector3<f64>,
+}
+
 pub struct MeasureGroup {
     pub lidar_begin_time: f64,
     pub lidar_end_time: f64,
     pub points: PointCloudXYZI,
-    pub _imu_poses: Vec<RosPose6D>,
+    pub imus: Vec<ImuData>,
 }
