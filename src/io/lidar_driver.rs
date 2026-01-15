@@ -1,7 +1,5 @@
 //! For Livox Mid360
 //! 
-//! Use Proto for data transmittion
-//! 
 //! Receives data from bridges implementing `SlamBridge` trait
 use std::io::{Cursor, Read};
 use tokio::net::UdpSocket;

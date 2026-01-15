@@ -1,0 +1,15 @@
+use config;
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LidarConfig {
+    pub lidar_bind_addr: String,
+    pub imu_bind_addr: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppConfig {
+    pub lidar: LidarConfig,
+    pub log_level: String,
+    pub log_path: String,
+}

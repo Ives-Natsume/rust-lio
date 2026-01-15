@@ -7,20 +7,21 @@ use rust_lio::utils::logging;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _logging_guard = logging::init_logging("logs", "rust-lio-");
-    tracing::info!("Starting UDP to MeasureGroup bridge");
-
     let (tx, rx) = flume::unbounded::<MeasureGroup>();
+
+    let lidar_config = rust_lio::config::LidarConfig {
+        lidar_bind_addr: "0.0.0.0:56301".to_string(),
+        imu_bind_addr: "0.0.0.0:56401".to_string(),
+    };
+
+    let bridge = rust_lio::frontend::lidar::init_lidar(&lidar_config).await?;
 
     thread::spawn(move || {
         some_function(rx);
     });
 
-    let lidar_addr: &str = "0.0.0.0:56301";
-    let imu_addr: &str = "0.0.0.0:56401";
-    let mut bridge = UdpBridge::new(lidar_addr, imu_addr).await?;
-
     loop {
-        let group = bridge.next_packet().await?;
+        let group = bridge.lock().unwrap().next_packet().await?;
         if let Err(e) = tx.send(group) {
             tracing::error!("Failed to send packet to processing thread: {}", e);
         }

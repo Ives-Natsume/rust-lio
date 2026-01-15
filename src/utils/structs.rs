@@ -21,6 +21,7 @@ pub struct RosPose6D {
 /// a.k.a [`pcl::PointXYZINormal`](https://pointclouds.org/documentation/structpcl_1_1_point_x_y_z_i_normal.html)
 /// 
 /// [Livox Point Cloud Data Format](https://livox-wiki-en.readthedocs.io/en/latest/tutorials/new_product/mid360/livox_eth_protocol_mid360.html#point-cloud-imu-data-protocol)
+#[derive(Clone, Debug)]
 pub struct PointXYZI {
     pub pos: nalgebra::Vector3<f32>,
     pub intensity: f32,
@@ -29,6 +30,7 @@ pub struct PointXYZI {
 /// Point cloud structure with intensity, FLU coordinate system
 ///
 /// a.k.a [`pcl::PointCloud<PointXYZINormal>`](https://pointclouds.org/documentation/classpcl_1_1_point_cloud.html)
+#[derive(Clone, Debug)]
 pub struct PointCloudXYZI {
     pub timestamp: f64,             // timestamp of the point cloud (seconds)
     pub width: u32,                 // number of points per row
@@ -79,6 +81,7 @@ pub struct ImuData {
     pub gyr: Vector3<f64>,
 }
 
+#[derive(Clone, Debug)]
 pub struct MeasureGroup {
     pub lidar_begin_time: f64,
     pub lidar_end_time: f64,
