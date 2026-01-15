@@ -6,6 +6,9 @@ use tokio::net::UdpSocket;
 use byteorder::{LittleEndian, ReadBytesExt};
 use crate::utils::structs::*;
 use nalgebra::Vector3;
+use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
 
 #[async_trait::async_trait]
 pub trait SlamBridge: Send + Sync {
@@ -24,12 +27,22 @@ pub struct UdpBridge {
     imu_recv_buffer: [u8; 65535], // Max UDP size
     imu_buffer: Vec<ImuData>,
     lidar_buffer: Vec<PointCloudXYZI>,
+    last_update_time: Arc<AtomicU64>,
 }
 
 impl UdpBridge {
     pub async fn new(lidar_bind_addr: &str, imu_bind_addr: &str) -> anyhow::Result<Self> {
         let lidar_socket = UdpSocket::bind(lidar_bind_addr).await?;
         let imu_socket = UdpSocket::bind(imu_bind_addr).await?;
+        
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let last_update_time = Arc::new(AtomicU64::new(now));
+        
+        let monitor_time = last_update_time.clone();
+        thread::spawn(move || {
+            monitor_lidar_status(monitor_time);
+        });
+
         Ok(UdpBridge {
             lidar_socket,
             imu_socket,
@@ -37,6 +50,7 @@ impl UdpBridge {
             imu_recv_buffer: [0u8; 65535],
             imu_buffer: Vec::new(),
             lidar_buffer: Vec::new(),
+            last_update_time,
         })
     }
 }
@@ -53,6 +67,10 @@ impl SlamBridge for UdpBridge {
                     match rawdata_decoder(&self.lidar_recv_buffer[..len]) {
                         Ok(RawPacket::Lidar(cloud)) => {
                             self.lidar_buffer.push(cloud);
+                            
+                            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                            self.last_update_time.store(now, Ordering::Relaxed);
+                            
                             packet_type = Some("lidar");
                         },
                         Ok(_) => {},
@@ -212,3 +230,16 @@ fn rawdata_decoder(data: &[u8]) -> anyhow::Result<RawPacket> {
         }
     }
 }
+
+fn monitor_lidar_status(last_update_time: Arc<AtomicU64>) {
+    loop {
+        thread::sleep(std::time::Duration::from_secs(1));
+        let last = last_update_time.load(Ordering::Relaxed);
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+
+        if now > last + 1 {
+            tracing::warn!("Lidar stream cut off! No data for {} seconds.", now - last);
+        }
+    }
+}
+

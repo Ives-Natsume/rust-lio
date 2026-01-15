@@ -10,6 +10,7 @@ async fn main() -> anyhow::Result<()> {
     let (tx, rx) = flume::unbounded::<MeasureGroup>();
 
     let lidar_config = rust_lio::config::LidarConfig {
+        data_source: rust_lio::config::DataSource::Udp,
         lidar_bind_addr: "0.0.0.0:56301".to_string(),
         imu_bind_addr: "0.0.0.0:56401".to_string(),
     };

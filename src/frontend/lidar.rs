@@ -1,7 +1,6 @@
 use crate::io::lidar_driver::*;
 use crate::utils::structs::MeasureGroup;
 use crate::config::LidarConfig;
-use core::time;
 use std::sync::{Arc, Mutex};
 
 /// Check and correct time synchronization between LIDAR and IMU data
@@ -36,13 +35,23 @@ pub fn time_sync(
     Ok(())
 }
 
-pub async fn init_lidar(config: &LidarConfig) -> anyhow::Result<Arc<Mutex<UdpBridge>>> {
+pub async fn init_lidar(config: &LidarConfig) -> anyhow::Result<Arc<Mutex<dyn SlamBridge>>> {
     tracing::info!("Initializing LIDAR");
-    let lidar_addr = config.lidar_bind_addr.as_str();
-    let imu_addr = config.imu_bind_addr.as_str();
 
-    let bridge = UdpBridge::new(lidar_addr, imu_addr).await?;
-    let arc_bridge = Arc::new(Mutex::new(bridge));
+    let arc_bridge: Arc<Mutex<dyn SlamBridge>>;
+
+    match config.data_source {
+        crate::config::DataSource::Udp => {
+            let bridge = UdpBridge::new(
+                &config.lidar_bind_addr,
+                &config.imu_bind_addr,
+            ).await?;
+            arc_bridge = Arc::new(Mutex::new(bridge));
+        }
+        crate::config::DataSource::Ros => {
+            unimplemented!("ROS data source is not implemented yet");
+        }
+    }
 
     // time synchronization test
     {
