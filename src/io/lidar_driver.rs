@@ -5,7 +5,7 @@ use std::io::{Cursor, Read};
 use tokio::net::UdpSocket;
 use byteorder::{LittleEndian, ReadBytesExt};
 use crate::utils::structs::*;
-use nalgebra::Vector3;
+use sophus::nalgebra::Vector3;
 use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::thread;
@@ -24,14 +24,15 @@ pub struct UdpBridge {
     lidar_socket: UdpSocket,
     imu_socket: UdpSocket,
     lidar_recv_buffer: [u8; 65535], // Max UDP size
-    imu_recv_buffer: [u8; 65535], // Max UDP size
+    imu_recv_buffer: [u8; 65535],   // Max UDP size
+    frame_time: u64,                // in milliseconds
     imu_buffer: Vec<ImuData>,
     lidar_buffer: Vec<PointCloudXYZI>,
     last_update_time: Arc<AtomicU64>,
 }
 
 impl UdpBridge {
-    pub async fn new(lidar_bind_addr: &str, imu_bind_addr: &str) -> anyhow::Result<Self> {
+    pub async fn new(lidar_bind_addr: &str, imu_bind_addr: &str, frame_time: &u64) -> anyhow::Result<Self> {
         let lidar_socket = UdpSocket::bind(lidar_bind_addr).await?;
         let imu_socket = UdpSocket::bind(imu_bind_addr).await?;
         
@@ -48,6 +49,7 @@ impl UdpBridge {
             imu_socket,
             lidar_recv_buffer: [0u8; 65535],
             imu_recv_buffer: [0u8; 65535],
+            frame_time: frame_time.clone(),
             imu_buffer: Vec::new(),
             lidar_buffer: Vec::new(),
             last_update_time,
@@ -93,7 +95,7 @@ impl SlamBridge for UdpBridge {
             if let Some("lidar") = packet_type {
                 if let (Some(first), Some(last)) = (self.lidar_buffer.first(), self.lidar_buffer.last()) {
                     let duration = last.timestamp - first.timestamp;
-                    if duration >= 0.1 { // 100ms frame
+                    if duration >= self.frame_time as f64 / 1000.0 {
                         // Construct MeasureGroup
                         let lidar_begin_time = first.timestamp;
                         let lidar_end_time = last.timestamp;
@@ -242,4 +244,3 @@ fn monitor_lidar_status(last_update_time: Arc<AtomicU64>) {
         }
     }
 }
-

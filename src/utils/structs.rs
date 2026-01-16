@@ -1,5 +1,6 @@
-use nalgebra::{Vector3};
+use sophus::nalgebra::{Vector3, SMatrix};
 use std::vec::Vec;
+use sophus::lie::Rotation3F64;
 
 //  the preintegrated Lidar states at the time of IMU measurements in a frame
 ///
@@ -87,4 +88,98 @@ pub struct MeasureGroup {
     pub lidar_end_time: f64,
     pub points: PointCloudXYZI,
     pub imus: Vec<ImuData>,
+}
+
+/// Based on [S-FAST_LIO](https://github.com/zlwang7/S-FAST_LIO.git)
+#[derive(Clone, Debug)]
+pub struct ImuProcess{
+    // noise covariances
+    pub cov_acc: Vector3<f64>,          // accelerometer noise covariance
+    pub cov_gyr: Vector3<f64>,          // gyroscope noise covariance
+    pub cov_acc_scale: Vector3<f64>,    // accelerometer scale factor noise covariance
+    pub cov_gyr_scale: Vector3<f64>,    // gyroscope scale factor noise covariance
+    pub cov_acc_bias: Vector3<f64>,     // accelerometer bias random walk noise covariance
+    pub cov_gyr_bias: Vector3<f64>,     // gyroscope bias random walk noise covariance
+    pub q: SMatrix<f64, 12, 12>,     // IMU noise covariance matrix
+
+    // extrinsic calibration
+    pub lidar_r_wrt_imu: Rotation3F64,  // rotation from IMU frame to Lidar frame
+    pub lidar_t_wrt_imu: Vector3<f64>,  // translation from IMU frame to Lidar frame
+
+    // state variables
+    pub last_imu: Option<ImuData>,      // last IMU measurement
+    pub angvel_last: Vector3<f64>,      // last angular velocity
+    pub acc_s_last: Vector3<f64>,       // last specific force
+
+    // timestamp & other
+    pub first_lidar_time: f64,          // first lidar point time in the current frame
+    pub start_timestamp: f64,           // start timestamp of the current frame
+    pub last_lidar_end_time_: f64,      // last lidar end time
+    pub b_first_frame_: bool,           // flag for first frame
+    pub imu_need_init_: bool,           // flag for IMU initialization
+    pub init_iter_num: u32,             // number of iterations for IMU initialization
+    pub mean_acc: Vector3<f64>,         // mean acceleration for IMU initialization
+    pub mean_gyr: Vector3<f64>,         // mean gyroscope for IMU initialization
+}
+
+impl Default for ImuProcess {
+    fn default() -> Self {
+        Self {
+            cov_acc: Vector3::new(0.1, 0.1, 0.1),
+            cov_gyr: Vector3::new(0.1, 0.1, 0.1),
+            cov_acc_scale: Vector3::zeros(),
+            cov_gyr_scale: Vector3::zeros(),
+            cov_acc_bias: Vector3::new(0.0001, 0.0001, 0.0001),
+            cov_gyr_bias: Vector3::new(0.0001, 0.0001, 0.0001),
+            q: crate::core::math::ikfom::process_noise_cov(),
+            lidar_r_wrt_imu: Rotation3F64::identity(),
+            lidar_t_wrt_imu: Vector3::zeros(),
+            last_imu: None,
+            angvel_last: Vector3::zeros(),
+            acc_s_last: Vector3::zeros(),
+            first_lidar_time: 0.0,
+            start_timestamp: -1.0,
+            last_lidar_end_time_: 0.0,
+            b_first_frame_: true,
+            imu_need_init_: true,
+            init_iter_num: 1,
+            mean_acc: Vector3::new(0.0, 0.0, -1.0),
+            mean_gyr: Vector3::zeros(),
+        }
+    }
+}
+
+impl ImuProcess {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reset IMU processor to initial state
+    pub fn reset(&mut self) {
+        self.mean_acc = Vector3::new(0.0, 0.0, -1.0);
+        self.mean_gyr = Vector3::zeros();
+        self.angvel_last = Vector3::zeros();
+        self.imu_need_init_ = true;
+        self.start_timestamp = -1.0;
+        self.init_iter_num = 1;
+        self.last_imu = None;
+    }
+
+    /// Set extrinsic calibration and noise parameters
+    pub fn set_param(
+        &mut self,
+        transl: Vector3<f64>,
+        rot: Rotation3F64,
+        gyr_scale: Vector3<f64>,
+        acc_scale: Vector3<f64>,
+        gyr_bias: Vector3<f64>,
+        acc_bias: Vector3<f64>,
+    ) {
+        self.lidar_t_wrt_imu = transl;
+        self.lidar_r_wrt_imu = rot;
+        self.cov_gyr_scale = gyr_scale;
+        self.cov_acc_scale = acc_scale;
+        self.cov_gyr_bias = gyr_bias;
+        self.cov_acc_bias = acc_bias;
+    }
 }
