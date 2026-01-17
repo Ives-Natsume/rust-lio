@@ -418,6 +418,10 @@ impl ImuProcess {
                 imu_state.pos,
                 rot_matrix,
             ));
+            tracing::debug!("IMU pose at t={:.6}s: pos=[{:.4}, {:.4}, {:.4}], vel=[{:.4}, {:.4}, {:.4}]",
+                offset_t,
+                imu_state.pos[0], imu_state.pos[1], imu_state.pos[2],
+                imu_state.vel[0], imu_state.vel[1], imu_state.vel[2]);
         }
         
         // Propagate to lidar end time

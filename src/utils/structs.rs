@@ -32,7 +32,7 @@ impl ImuPose {
 //  the preintegrated Lidar states at the time of IMU measurements in a frame
 ///
 /// a.k.a. Pose6D.msg in FAST-LIO2 
-pub struct RosPose6D {
+pub struct _RosPose6D {
     pub offset_time: f64,   // the offset time of IMU measurement w.r.t the first lidar point
     pub acc: Vector3<f64>,  // the preintegrated total acceleration (global frame) at the Lidar origin
     pub gyr: Vector3<f64>,  // the unbiased angular velocity (body frame) at the Lidar origin

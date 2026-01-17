@@ -6,7 +6,7 @@ use std::thread;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _logging_guard = logging::init_logging("logs", "rust-lio-");
+    let _logging_guard = logging::init_logging("logs", "rust-lio", "debug");
     let (tx, rx) = flume::unbounded::<MeasureGroup>();
 
     let lidar_config = rust_lio::config::LidarConfig {
