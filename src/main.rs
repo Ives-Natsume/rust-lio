@@ -1,9 +1,8 @@
 use flume;
-use rust_lio::io::lidar_driver::*;
 use rust_lio::utils::structs::MeasureGroup;
-use rust_lio::core::state::SlamContext;
-use std::thread;
 use rust_lio::utils::logging;
+use rust_lio::config::CONFIG;
+use std::thread;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -17,8 +16,10 @@ async fn main() -> anyhow::Result<()> {
         imu_bind_addr: "0.0.0.0:56401".to_string(),
     };
 
+    CONFIG.set(lidar_config).unwrap();
+
     // Initialize and get the full SLAM context
-    let mut ctx = rust_lio::frontend::sensor::sensor_init(&lidar_config).await?;
+    let mut ctx = rust_lio::frontend::sensor::sensor_init(CONFIG.get().unwrap()).await?;
     
     tracing::info!("SLAM context initialized, IMU ready: {}", ctx.is_initialized());
     tracing::info!("Initial gravity estimate: {:?}", ctx.get_state().grav);
@@ -46,8 +47,8 @@ async fn main() -> anyhow::Result<()> {
 fn some_function(receiver: flume::Receiver<MeasureGroup>) {
     tracing::info!("Starting some_function thread");
     while let Ok(group) = receiver.recv() {
-        tracing::info!("Received MeasureGroup: {} points, {} IMU measurements, timestamp {}", 
-            group.points.points.len(), group.imus.len(), group.lidar_end_time);
+        tracing::info!("Received MeasureGroup: {} packets, {} IMU measurements, timestamp {}", 
+            group.points.len(), group.imus.len(), group.lidar_end_time);
         // Process the group...
     }
 }

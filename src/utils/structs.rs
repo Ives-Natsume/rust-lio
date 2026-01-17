@@ -1,6 +1,33 @@
-use sophus::nalgebra::{Vector3, SMatrix};
+use sophus::nalgebra::{Matrix3, Vector3, SMatrix};
 use std::vec::Vec;
 use sophus::lie::Rotation3F64;
+
+/// IMU pose at a specific time instant (for motion compensation)
+/// 
+/// Stores the robot state at each IMU measurement time,
+/// used for backward propagation to undistort point cloud.
+#[derive(Clone, Debug)]
+pub struct ImuPose {
+    pub offset_time: f64,       // time offset from LiDAR frame start (seconds)
+    pub acc: Vector3<f64>,      // world-frame acceleration at this instant
+    pub gyr: Vector3<f64>,      // body-frame angular velocity (bias-corrected)
+    pub vel: Vector3<f64>,      // world-frame velocity
+    pub pos: Vector3<f64>,      // world-frame position
+    pub rot: Matrix3<f64>,      // rotation matrix (body to world)
+}
+
+impl ImuPose {
+    pub fn new(
+        offset_time: f64,
+        acc: Vector3<f64>,
+        gyr: Vector3<f64>,
+        vel: Vector3<f64>,
+        pos: Vector3<f64>,
+        rot: Matrix3<f64>,
+    ) -> Self {
+        Self { offset_time, acc, gyr, vel, pos, rot }
+    }
+}
 
 //  the preintegrated Lidar states at the time of IMU measurements in a frame
 ///
@@ -14,7 +41,7 @@ pub struct RosPose6D {
     pub rot: Vec<f64>,      // the preintegrated rotation (global frame) at the Lidar origin
 }
 
-/// Point type with intensity, FLU coordinate system
+/// Point type with intensity and timestamp, FLU coordinate system
 /// 
 /// Notice the `pos` field is a nalgebra `Vector3<f32>`,
 /// which differs from [`RosPose6D.pos`](crate::utils::structs::RosPose6D)
@@ -24,8 +51,11 @@ pub struct RosPose6D {
 /// [Livox Point Cloud Data Format](https://livox-wiki-en.readthedocs.io/en/latest/tutorials/new_product/mid360/livox_eth_protocol_mid360.html#point-cloud-imu-data-protocol)
 #[derive(Clone, Debug)]
 pub struct PointXYZI {
-    pub pos: nalgebra::Vector3<f32>,
+    pub pos: Vector3<f32>,
     pub intensity: f32,
+    /// Timestamp offset from frame start (seconds)
+    /// In C++ FAST-LIO, this is stored in `curvature` field (milliseconds)
+    pub timestamp: f64,
 }
 
 /// Point cloud structure with intensity, FLU coordinate system
@@ -86,7 +116,7 @@ pub struct ImuData {
 pub struct MeasureGroup {
     pub lidar_begin_time: f64,
     pub lidar_end_time: f64,
-    pub points: PointCloudXYZI,
+    pub points: Vec<PointCloudXYZI>,
     pub imus: Vec<ImuData>,
 }
 

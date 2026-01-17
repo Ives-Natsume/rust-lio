@@ -1,12 +1,16 @@
 //! Sensor initialization
 //! 
 //! For MID360 only
-use crate::{io::lidar_driver::*, utils::structs::ImuProcess};
+use crate::{
+    io::lidar_driver::*,
+    utils::structs::{ImuProcess, ImuPose, ImuData, PointCloudXYZI, PointXYZI},
+};
 use crate::utils::structs::MeasureGroup;
 use crate::config::LidarConfig;
-use crate::core::math::ikfom::{EsEkfom, G_M_S2, MAX_INI_COUNT};
+use crate::core::math::ikfom::{EsEkfom, InputIkfom, G_M_S2, MAX_INI_COUNT};
 use crate::core::state::SlamContext;
-use sophus::nalgebra::SMatrix;
+use sophus::nalgebra::{SMatrix, Vector3};
+use sophus::lie::Rotation3F64;
 use std::sync::{Arc, Mutex};
 
 impl SlamContext {
@@ -28,8 +32,13 @@ impl SlamContext {
         // Time sync check
         time_sync(&mut group)?;
         
-        // TODO: Add IMU forward propagation here
-        // self.imu_processor.process(&group, &mut self.kf);
+        // Undistort and forward propagate
+        match self.imu_processor.undistort_pcl(&mut group, &mut self.kf) {
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("Undistort point cloud failed: {}", e);
+            }
+        }
         
         Ok(group)
     }
@@ -49,7 +58,7 @@ impl SlamContext {
 fn time_sync(
     payload: &mut MeasureGroup,
 ) -> anyhow::Result<()> {
-    if payload.imus.is_empty() || payload.points.points.is_empty() {
+    if payload.imus.is_empty() || payload.points.is_empty() {
         return Ok(());
     }
 
@@ -282,5 +291,217 @@ impl ImuProcess {
         }
 
         false
+    }
+
+    /// Undistort point cloud using IMU forward propagation
+    /// 
+    /// This is equivalent to `UndistortPcl` in C++ S-FAST_LIO.
+    /// 
+    /// Updates the provided `payload` point cloud in place
+    /// 
+    /// Algorithm:
+    /// 1. Prepend last IMU from previous frame to current IMU queue
+    /// 2. Sort point cloud by timestamp
+    /// 3. Forward propagate through all IMU measurements, storing intermediate poses
+    /// 4. Backward propagate to compensate each point's motion distortion
+    /// 
+    /// # Arguments
+    /// * `payload` - MeasureGroup containing IMU data and point cloud
+    /// * `kf_state` - Kalman filter state (will be updated)
+    pub fn undistort_pcl(
+        &mut self,
+        payload: &mut MeasureGroup,
+        kf_state: &mut EsEkfom,
+    ) -> anyhow::Result<()> {
+        // Build IMU queue: prepend last IMU from previous frame
+        let mut v_imu: Vec<ImuData> = Vec::with_capacity(payload.imus.len() + 1);
+        if let Some(ref last) = self.last_imu {
+            v_imu.push(last.clone());
+        }
+        v_imu.extend(payload.imus.iter().cloned());
+        
+        if v_imu.len() < 2 {
+            return Err(anyhow::Error::msg("Not enough IMU data for undistortion"));
+        }
+        
+        let imu_end_time = v_imu.last().unwrap().timestamp;
+        let pcl_beg_time = payload.lidar_begin_time;
+        let pcl_end_time = payload.lidar_end_time;
+        
+        // Collect and sort all points by timestamp
+        let mut pcl_out: Vec<PointXYZI> = payload.points
+            .iter()
+            .flat_map(|pc| pc.points.clone())
+            .collect();
+        pcl_out.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap_or(std::cmp::Ordering::Equal));
+        
+        if pcl_out.is_empty() {
+            return Err(anyhow::Error::msg("No points in point cloud for undistortion"));
+        }
+        
+        // Get initial state from KF
+        let mut imu_state = kf_state.get_x().clone();
+        
+        // Store intermediate poses for backward propagation
+        let mut imu_poses: Vec<ImuPose> = Vec::with_capacity(v_imu.len());
+        imu_poses.push(ImuPose::new(
+            0.0,
+            self.acc_s_last,
+            self.angvel_last,
+            imu_state.vel,
+            imu_state.pos,
+            imu_state.rot.matrix(),
+        ));
+        
+        // ========== Forward Propagation ==========
+        let mut input = InputIkfom::default();
+        
+        for i in 0..(v_imu.len() - 1) {
+            let head = &v_imu[i];
+            let tail = &v_imu[i + 1];
+            
+            // Skip if tail timestamp is before last lidar end time
+            if tail.timestamp < self.last_lidar_end_time_ {
+                continue;
+            }
+            
+            // Midpoint integration for angular velocity and acceleration
+            let angvel_avr = (head.gyr + tail.gyr) * 0.5;
+            let acc_avr_raw = (head.acc + tail.acc) * 0.5;
+            
+            // Scale acceleration by gravity ratio (normalize to actual gravity)
+            let acc_avr = acc_avr_raw * G_M_S2 / self.mean_acc.norm();
+            
+            // Compute dt (handle case where head is before last lidar end)
+            let dt = if head.timestamp < self.last_lidar_end_time_ {
+                tail.timestamp - self.last_lidar_end_time_
+            } else {
+                tail.timestamp - head.timestamp
+            };
+            
+            if dt <= 0.0 {
+                continue;
+            }
+            
+            // Prepare input for Kalman filter
+            input.acc = acc_avr;
+            input.gyro = angvel_avr;
+            
+            // Update Q matrix with current covariances
+            self.q.fixed_view_mut::<3, 3>(0, 0).fill_diagonal(self.cov_gyr[0]);
+            self.q.fixed_view_mut::<3, 3>(3, 3).fill_diagonal(self.cov_acc[0]);
+            self.q.fixed_view_mut::<3, 3>(6, 6).fill_diagonal(self.cov_gyr_bias[0]);
+            self.q.fixed_view_mut::<3, 3>(9, 9).fill_diagonal(self.cov_acc_bias[0]);
+            
+            // Forward propagate Kalman filter
+            kf_state.predict(dt, &self.q, &input);
+            
+            // Update state
+            imu_state = kf_state.get_x().clone();
+            
+            // Update last angular velocity (bias-corrected)
+            self.angvel_last = tail.gyr - imu_state.bg;
+            
+            // Update last world-frame acceleration
+            // acc_s_last = R * (acc_scaled - ba) + grav
+            let acc_scaled = tail.acc * G_M_S2 / self.mean_acc.norm();
+            let rot_matrix = imu_state.rot.matrix();
+            self.acc_s_last = rot_matrix * (acc_scaled - imu_state.ba) + imu_state.grav;
+            
+            // Store pose for backward propagation
+            let offset_t = tail.timestamp - pcl_beg_time;
+            imu_poses.push(ImuPose::new(
+                offset_t,
+                self.acc_s_last,
+                self.angvel_last,
+                imu_state.vel,
+                imu_state.pos,
+                rot_matrix,
+            ));
+        }
+        
+        // Propagate to lidar end time
+        let dt_final = (pcl_end_time - imu_end_time).abs();
+        if dt_final > 0.0 {
+            kf_state.predict(dt_final, &self.q, &input);
+            imu_state = kf_state.get_x().clone();
+        }
+        
+        // Save state for next frame
+        self.last_imu = payload.imus.last().cloned();
+        self.last_lidar_end_time_ = pcl_end_time;
+        
+        // ========== Backward Propagation (Point Undistortion) ==========
+        if imu_poses.len() < 2 {
+            return Err(anyhow::Error::msg("Not enough IMU poses for undistortion"));
+        }
+        
+        let mut it_pcl = pcl_out.len() - 1;
+        
+        // Iterate through IMU poses in reverse
+        for kp_idx in (1..imu_poses.len()).rev() {
+            let head = &imu_poses[kp_idx - 1];
+            let tail = &imu_poses[kp_idx];
+            
+            let r_imu = head.rot;
+            let vel_imu = head.vel;
+            let pos_imu = head.pos;
+            let acc_imu = tail.acc;
+            let angvel_avr = tail.gyr;
+            
+            // Process points within this IMU interval
+            while it_pcl > 0 && pcl_out[it_pcl].timestamp > head.offset_time {
+                let dt = pcl_out[it_pcl].timestamp - head.offset_time;
+                
+                // Compute rotation at point time: R_i = R_head * exp(omega * dt)
+                let omega_dt = angvel_avr * dt;
+                let delta_rot = Rotation3F64::exp(omega_dt);
+                let r_i = r_imu * delta_rot.matrix();
+                
+                // Point position in LiDAR frame
+                let p_i = Vector3::new(
+                    pcl_out[it_pcl].pos[0] as f64,
+                    pcl_out[it_pcl].pos[1] as f64,
+                    pcl_out[it_pcl].pos[2] as f64,
+                );
+                
+                // Translation from point time to end time
+                // T_ei = pos_at_point_time - pos_at_end_time
+                let t_ei = pos_imu + vel_imu * dt + 0.5 * acc_imu * dt * dt - imu_state.pos;
+                
+                // Transform point to end-of-frame position
+                // P_compensate = R_L_I^T * (R_end^T * (R_i * (R_L_I * P_i + T_L_I) + T_ei) - T_L_I)
+                let offset_r = imu_state.offset_r_l_i.matrix();
+                let offset_t = imu_state.offset_t_l_i;
+                let rot_end = imu_state.rot.matrix();
+                
+                let p_imu = offset_r * p_i + offset_t;  // LiDAR to IMU frame
+                let p_world = r_i * p_imu + t_ei;       // To world frame at point time, then translate
+                let p_end_imu = rot_end.transpose() * p_world - offset_t;  // To IMU frame at end time
+                let p_compensate = offset_r.transpose() * p_end_imu;  // Back to LiDAR frame
+                
+                pcl_out[it_pcl].pos[0] = p_compensate[0] as f32;
+                pcl_out[it_pcl].pos[1] = p_compensate[1] as f32;
+                pcl_out[it_pcl].pos[2] = p_compensate[2] as f32;
+                
+                if it_pcl == 0 {
+                    break;
+                }
+                it_pcl -= 1;
+            }
+        }
+        
+        let width = pcl_out.len() as u32;
+        let undistorted_points: PointCloudXYZI = PointCloudXYZI {
+            points: pcl_out,
+            height: 1,
+            width: width,
+            timestamp: pcl_beg_time,
+            is_dense: true,
+        };
+
+        payload.points = vec![undistorted_points];
+
+        Ok(())
     }
 }

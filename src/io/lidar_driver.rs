@@ -100,11 +100,10 @@ impl SlamBridge for UdpBridge {
                         let lidar_begin_time = first.timestamp;
                         let lidar_end_time = last.timestamp;
                         
-                        let mut all_points = Vec::new();
+                        let mut pcl_packet_queue = Vec::new();
                         for cloud in self.lidar_buffer.drain(..) {
-                            all_points.extend(cloud.points);
+                            pcl_packet_queue.push(cloud);
                         }
-                        let points = PointCloudXYZI::from_points(all_points, lidar_end_time); // Use end time as frame time?
 
                         // Extract relevant IMU data
                         // We need IMU data covering [begin_time, end_time]
@@ -129,7 +128,7 @@ impl SlamBridge for UdpBridge {
                         return Ok(MeasureGroup {
                             lidar_begin_time,
                             lidar_end_time,
-                            points,
+                            points: pcl_packet_queue,
                             imus: frame_imus,
                         });
                     }
@@ -199,8 +198,9 @@ fn rawdata_decoder(data: &[u8]) -> anyhow::Result<RawPacket> {
                 }
 
                 points.push(PointXYZI {
-                    pos: nalgebra::Vector3::new(x, y, z),
+                    pos: Vector3::new(x, y, z),
                     intensity,
+                    timestamp: timestamp_sec,
                 });
             }
             

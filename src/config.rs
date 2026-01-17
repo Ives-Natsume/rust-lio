@@ -1,4 +1,4 @@
-use config;
+use std::sync::OnceLock;
 use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,3 +21,5 @@ pub struct AppConfig {
     pub log_level: String,
     pub log_path: String,
 }
+
+pub static CONFIG: OnceLock<LidarConfig> = OnceLock::new();
