@@ -1,0 +1,7 @@
+log_level = "info"
+
+[lidar]
+data_source = "Udp"
+frame_time = 50
+lidar_bind_addr = "0.0.0.0:56301"
+imu_bind_addr = "0.0.0.0:56401"

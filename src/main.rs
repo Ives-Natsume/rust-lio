@@ -1,25 +1,18 @@
 use flume;
 use rust_lio::utils::structs::MeasureGroup;
 use rust_lio::utils::logging;
-use rust_lio::config::CONFIG;
+use rust_lio::config::{CONFIG, read_config};
 use std::thread;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _logging_guard = logging::init_logging("logs", "rust-lio", "debug");
+    read_config()?;
+
+    let _logging_guard = logging::init_logging("logs", "rust-lio", &CONFIG.get().unwrap().log_level);
     let (tx, rx) = flume::unbounded::<MeasureGroup>();
 
-    let lidar_config = rust_lio::config::LidarConfig {
-        data_source: rust_lio::config::DataSource::Udp,
-        frame_time: 50,
-        lidar_bind_addr: "0.0.0.0:56301".to_string(),
-        imu_bind_addr: "0.0.0.0:56401".to_string(),
-    };
-
-    CONFIG.set(lidar_config).unwrap();
-
     // Initialize and get the full SLAM context
-    let mut ctx = rust_lio::frontend::sensor::sensor_init(CONFIG.get().unwrap()).await?;
+    let mut ctx = rust_lio::frontend::sensor::sensor_init(&CONFIG.get().unwrap().lidar).await?;
     
     tracing::info!("SLAM context initialized, IMU ready: {}", ctx.is_initialized());
     tracing::info!("Initial gravity estimate: {:?}", ctx.get_state().grav);
