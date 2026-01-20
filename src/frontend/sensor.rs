@@ -2,12 +2,13 @@
 //! 
 //! For MID360 only
 use crate::{
+    config::AppConfig,
     io::lidar_driver::*,
-    utils::structs::{ImuProcess, ImuPose, ImuData, PointCloudXYZI, PointXYZI},
+    utils::structs::{ImuData, ImuPose, ImuProcess, PointCloudXYZI, PointXYZI}
 };
 use crate::utils::structs::MeasureGroup;
-use crate::config::LidarConfig;
 use crate::core::math::ikfom::{EsEkfom, InputIkfom, G_M_S2, MAX_INI_COUNT};
+use crate::core::math::ikd_tree::{IkdTree, IkdTreePoint};
 use crate::core::state::SlamContext;
 use sophus::nalgebra::{SMatrix, Vector3};
 use sophus::lie::Rotation3F64;
@@ -19,7 +20,7 @@ impl SlamContext {
     /// This method:
     /// 1. Gets the next packet from the sensor bridge
     /// 2. Performs time synchronization check
-    /// 3. (TODO) Performs IMU forward propagation
+    /// 3. Performs IMU forward propagation
     /// 
     /// # Returns
     /// The processed MeasureGroup, or an error
@@ -39,6 +40,8 @@ impl SlamContext {
                 tracing::warn!("Undistort point cloud failed: {}", e);
             }
         }
+
+        tracing::debug!("Estimated Position: {:?}", self.kf.get_x().pos);
         
         Ok(group)
     }
@@ -51,6 +54,62 @@ impl SlamContext {
     /// Check if IMU is initialized
     pub fn is_initialized(&self) -> bool {
         !self.imu_processor.imu_need_init_
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[allow(unused_imports)]
+    use super::*;
+    #[allow(dead_code)]
+    async fn test_save_one_frame() {
+        assert_eq!(&crate::config::CONFIG.get().unwrap().lidar.max_boundary, &5.0);
+        let mut ctx: SlamContext = crate::frontend::sensor::sensor_init(&crate::config::CONFIG.get().unwrap()).await.unwrap();
+        match ctx.process_next().await {
+            Ok(group) => {
+                let pcl: Vec<PointXYZI> = group.points.iter().flat_map(|p| p.points.clone()).collect();
+                let cloud = PointCloudXYZI::from_points(pcl, group.lidar_begin_time);
+                cloud.save_to_txt("logs/test_output.txt").unwrap();
+            }
+            Err(e) => {
+                println!("Processing error: {}", e);
+            }
+        }
+    }
+
+    use super::*;
+    #[tokio::test]
+    #[ignore]  // This test needs ESIKF correction to pass; ignoring until full pipeline is tested
+    async fn test_pcl_boundary() {
+        let mut ctx: SlamContext = crate::frontend::sensor::sensor_init(&crate::config::CONFIG.get().unwrap()).await.unwrap();
+        match ctx.process_next().await {
+            Ok(group) => {
+                let new_scan = group.points.iter().flat_map(|p| {
+                    p.to_point_vector()
+                }).collect();
+                let config_max_boundary = crate::config::CONFIG.get().unwrap().lidar.max_boundary;
+                ctx.ikd_tree.add_points(&new_scan, false);
+                let box_point = ctx.ikd_tree.tree_range();
+                let string = format!(
+                    "Map boundary box: min({:.2}, {:.2}, {:.2}), max({:.2}, {:.2}, {:.2})\nConfig max boundary: {:.2}\n",
+                    box_point.vertex_min[0], box_point.vertex_min[1], box_point.vertex_min[2],
+                    box_point.vertex_max[0], box_point.vertex_max[1], box_point.vertex_max[2],
+                    config_max_boundary
+                );
+
+                let _path = "logs/test_boundary.txt";
+                std::fs::write("logs/test_boundary.txt", string).unwrap();
+                assert_eq!(box_point.vertex_min[0].abs() < config_max_boundary, true);
+                assert_eq!(box_point.vertex_min[1].abs() < config_max_boundary, true);
+                assert_eq!(box_point.vertex_min[2].abs() < config_max_boundary, true);
+                assert_eq!(box_point.vertex_max[0].abs() < config_max_boundary, true);
+                assert_eq!(box_point.vertex_max[1].abs() < config_max_boundary, true);
+                assert_eq!(box_point.vertex_max[2].abs() < config_max_boundary, true);
+            }
+            Err(e) => {
+                println!("Processing error: {}", e);
+            }
+        }
     }
 }
 
@@ -86,17 +145,18 @@ fn time_sync(
     Ok(())
 }
 
-pub async fn sensor_init(config: &LidarConfig) -> anyhow::Result<SlamContext> {
-    tracing::info!("Initializing MID360, data source: {:?}", config.data_source);
+pub async fn sensor_init(config: &AppConfig) -> anyhow::Result<SlamContext> {
+    // TODO: code review
+    tracing::info!("Initializing MID360, data source: {:?}", config.lidar.data_source);
 
     let arc_bridge: Arc<Mutex<dyn SlamBridge>>;
 
-    match config.data_source {
+    match config.lidar.data_source {
         crate::config::DataSource::Udp => {
             let bridge = UdpBridge::new(
-                &config.lidar_bind_addr,
-                &config.imu_bind_addr,
-                &config.frame_time,
+                &config.lidar.lidar_bind_addr,
+                &config.lidar.imu_bind_addr,
+                &config.lidar.frame_time,
             ).await?;
             arc_bridge = Arc::new(Mutex::new(bridge));
         }
@@ -130,32 +190,60 @@ pub async fn sensor_init(config: &LidarConfig) -> anyhow::Result<SlamContext> {
     // imu init
     let mut kf = EsEkfom::new();
     let mut imu_processor = ImuProcess::new();
+    let mut first_lidar_time = 0.0;
 
     {
         let mut init_bridge = arc_bridge.lock().unwrap();
         loop {
             let group = init_bridge.next_packet().await?;
+            if first_lidar_time == 0.0 {
+                first_lidar_time = group.lidar_begin_time;
+            }
             if imu_processor.imu_init(&group, &mut kf) {
                 break;
             }
         }
     }
 
+    // build initial idk-tree
+    let mut ikd_tree = IkdTree::new(
+        config.ikd_tree.delete_criterion_param,
+        config.ikd_tree.balance_criterion_param,
+        config.ikd_tree.downsample_size
+    );
+    {
+        let mut init_bridge = arc_bridge.lock().unwrap();
+        let group = init_bridge.next_packet().await?;
+        let new_scan: Vec<IkdTreePoint> = group.points.iter().flat_map(|p| {
+            p.to_point_vector()
+        }).collect();
+        tracing::info!("Building initial ikd-tree with {} points", new_scan.len());
+        // sensor keep still during imu initialization, so no undistortion needed
+        ikd_tree.add_points(&new_scan, true);
+
+    }
+
     Ok(SlamContext {
         bridge: arc_bridge,
         imu_processor,
         kf,
+        ikd_tree,
+        first_lidar_time,
+        local_map_bounds: crate::core::math::ikd_tree::BoxPointType::default(),
+        local_map_initialized: false,
+        cube_len: 200.0,  // Default local map cube size
+        det_range: 100.0,  // Default detection range
     })
 }
 
 /// Initialize sensor and return only the bridge (legacy API)
 /// 
 /// Prefer using `sensor_init` which returns the full `SlamContext`
-pub async fn sensor_init_bridge_only(config: &LidarConfig) -> anyhow::Result<Arc<Mutex<dyn SlamBridge>>> {
+pub async fn sensor_init_bridge_only(config: &AppConfig) -> anyhow::Result<Arc<Mutex<dyn SlamBridge>>> {
     let ctx = sensor_init(config).await?;
     Ok(ctx.bridge)
 }
-
+    
 impl ImuProcess {
     /// IMU initialization: use the average of initial IMU frames to initialize state
     /// 
@@ -368,9 +456,13 @@ impl ImuProcess {
             // Midpoint integration for angular velocity and acceleration
             let angvel_avr = (head.gyr + tail.gyr) * 0.5;
             let acc_avr_raw = (head.acc + tail.acc) * 0.5;
-            
+
             // Scale acceleration by gravity ratio (normalize to actual gravity)
             let acc_avr = acc_avr_raw * G_M_S2 / self.mean_acc.norm();
+
+            // Normal input
+            input.acc = acc_avr;
+            input.gyro = angvel_avr;
             
             // Compute dt (handle case where head is before last lidar end)
             let dt = if head.timestamp < self.last_lidar_end_time_ {
@@ -382,10 +474,6 @@ impl ImuProcess {
             if dt <= 0.0 {
                 continue;
             }
-            
-            // Prepare input for Kalman filter
-            input.acc = acc_avr;
-            input.gyro = angvel_avr;
             
             // Update Q matrix with current covariances
             self.q.fixed_view_mut::<3, 3>(0, 0).fill_diagonal(self.cov_gyr[0]);
@@ -418,10 +506,10 @@ impl ImuProcess {
                 imu_state.pos,
                 rot_matrix,
             ));
-            tracing::debug!("IMU pose at t={:.6}s: pos=[{:.4}, {:.4}, {:.4}], vel=[{:.4}, {:.4}, {:.4}]",
-                offset_t,
-                imu_state.pos[0], imu_state.pos[1], imu_state.pos[2],
-                imu_state.vel[0], imu_state.vel[1], imu_state.vel[2]);
+            // tracing::debug!("IMU pose at t={:.6}s: pos=[{:.4}, {:.4}, {:.4}], vel=[{:.4}, {:.4}, {:.4}]",
+            //     offset_t,
+            //     imu_state.pos[0], imu_state.pos[1], imu_state.pos[2],
+            //     imu_state.vel[0], imu_state.vel[1], imu_state.vel[2]);
         }
         
         // Propagate to lidar end time
@@ -462,6 +550,24 @@ impl ImuProcess {
                 let delta_rot = Rotation3F64::exp(omega_dt);
                 let r_i = r_imu * delta_rot.matrix();
                 
+                // Translation from point time to end time (world frame)
+                // T_ei = pos_at_point_time - pos_at_end_time
+                let t_ei = pos_imu + vel_imu * dt + 0.5 * acc_imu * dt * dt - imu_state.pos;
+                
+                // Transform point to end-of-frame position
+                // Formula: P_compensate = R_L_I^T * (R_end^T * (R_i * (R_L_I * P_i + T_L_I) + T_ei) - T_L_I)
+                // 
+                // This compensates for the motion during the scan:
+                // 1. Transform point from LiDAR to IMU frame: R_L_I * P_i + T_L_I
+                // 2. Rotate to world frame at point capture time: R_i * (...)
+                // 3. Add translation offset: ... + T_ei
+                // 4. Rotate back to IMU frame at end time: R_end^T * (...)
+                // 5. Remove IMU-LiDAR offset: ... - T_L_I
+                // 6. Rotate to LiDAR frame: R_L_I^T * (...)
+                let offset_r = imu_state.offset_r_l_i.matrix();
+                let offset_t = imu_state.offset_t_l_i;
+                let rot_end = imu_state.rot.matrix();
+                
                 // Point position in LiDAR frame
                 let p_i = Vector3::new(
                     pcl_out[it_pcl].pos[0] as f64,
@@ -469,20 +575,10 @@ impl ImuProcess {
                     pcl_out[it_pcl].pos[2] as f64,
                 );
                 
-                // Translation from point time to end time
-                // T_ei = pos_at_point_time - pos_at_end_time
-                let t_ei = pos_imu + vel_imu * dt + 0.5 * acc_imu * dt * dt - imu_state.pos;
-                
-                // Transform point to end-of-frame position
+                // Apply the complete transformation in one expression (matching C++ exactly):
                 // P_compensate = R_L_I^T * (R_end^T * (R_i * (R_L_I * P_i + T_L_I) + T_ei) - T_L_I)
-                let offset_r = imu_state.offset_r_l_i.matrix();
-                let offset_t = imu_state.offset_t_l_i;
-                let rot_end = imu_state.rot.matrix();
-                
-                let p_imu = offset_r * p_i + offset_t;  // LiDAR to IMU frame
-                let p_world = r_i * p_imu + t_ei;       // To world frame at point time, then translate
-                let p_end_imu = rot_end.transpose() * p_world - offset_t;  // To IMU frame at end time
-                let p_compensate = offset_r.transpose() * p_end_imu;  // Back to LiDAR frame
+                let p_compensate = offset_r.transpose() * 
+                    (rot_end.transpose() * (r_i * (offset_r * p_i + offset_t) + t_ei) - offset_t);
                 
                 pcl_out[it_pcl].pos[0] = p_compensate[0] as f32;
                 pcl_out[it_pcl].pos[1] = p_compensate[1] as f32;

@@ -4,11 +4,12 @@
 use std::io::{Cursor, Read};
 use tokio::net::UdpSocket;
 use byteorder::{LittleEndian, ReadBytesExt};
-use crate::utils::structs::*;
 use sophus::nalgebra::Vector3;
 use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::thread;
+use crate::utils::structs::*;
+use crate::config::CONFIG;
 
 #[async_trait::async_trait]
 pub trait SlamBridge: Send + Sync {
@@ -184,16 +185,29 @@ fn rawdata_decoder(data: &[u8]) -> anyhow::Result<RawPacket> {
             }
             
             let mut points = Vec::with_capacity(dot_num as usize);
-            let minimum_distance = 0.1f32;
+            let min_boundary = 0.1f32;
+            let max_boundary = CONFIG.get().unwrap().lidar.max_boundary as f32;
+
+            // let mut temp_counter = 0;
+            // let mut x_farest_dist = 0.0f32;
 
             for _ in 0..dot_num {
-                let x = payload_cursor.read_f32::<LittleEndian>()?;
-                let y = payload_cursor.read_f32::<LittleEndian>()?;
-                let z = payload_cursor.read_f32::<LittleEndian>()?;
+                let x = payload_cursor.read_i32::<LittleEndian>()? as f32 * 0.001;
+                let y = payload_cursor.read_i32::<LittleEndian>()? as f32 * 0.001;
+                let z = payload_cursor.read_i32::<LittleEndian>()? as f32 * 0.001;
                 let intensity = payload_cursor.read_u8()? as f32;
                 let _tag = payload_cursor.read_u8()?;
 
-                if x.abs() < minimum_distance && y.abs() < minimum_distance && z.abs() < minimum_distance {
+                if x.abs() < min_boundary && y.abs() < min_boundary && z.abs() < min_boundary {
+                    // temp_counter += 1;
+                    continue;
+                }
+
+                if x.abs() > max_boundary || y.abs() > max_boundary || z.abs() > max_boundary {
+                    // temp_counter += 1;
+                    // if x.abs() > x_farest_dist {
+                    //     x_farest_dist = x.abs();
+                    // }
                     continue;
                 }
 
@@ -205,6 +219,8 @@ fn rawdata_decoder(data: &[u8]) -> anyhow::Result<RawPacket> {
             }
             
             let pointcloud = PointCloudXYZI::from_points(points, timestamp_sec);
+
+            // tracing::debug!("Filtered out {} points outside boundary, max x distance: {}", temp_counter, x_farest_dist);
             
             Ok(RawPacket::Lidar(pointcloud))
         },

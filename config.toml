@@ -1,7 +1,13 @@
-log_level = "info"
+log_level = "debug"
 
 [lidar]
 data_source = "Udp"
-frame_time = 50
+frame_time = 100
 lidar_bind_addr = "0.0.0.0:56301"
 imu_bind_addr = "0.0.0.0:56401"
+max_boundary = 5.0
+
+[ikd_tree]
+delete_criterion_param = 0.5
+balance_criterion_param = 0.6
+downsample_size = 0.05

@@ -1,6 +1,7 @@
 use sophus::nalgebra::{Matrix3, Vector3, SMatrix};
 use std::vec::Vec;
 use sophus::lie::Rotation3F64;
+use crate::core::math::ikd_tree::{PointVector, IkdTreePoint};
 
 /// IMU pose at a specific time instant (for motion compensation)
 /// 
@@ -51,6 +52,7 @@ pub struct _RosPose6D {
 /// [Livox Point Cloud Data Format](https://livox-wiki-en.readthedocs.io/en/latest/tutorials/new_product/mid360/livox_eth_protocol_mid360.html#point-cloud-imu-data-protocol)
 #[derive(Clone, Debug)]
 pub struct PointXYZI {
+    /// In FLU coordinate system, meters
     pub pos: Vector3<f32>,
     pub intensity: f32,
     /// Timestamp offset from frame start (seconds)
@@ -95,12 +97,27 @@ impl PointCloudXYZI {
         }
     }
 
+    pub fn to_point_vector(&self) -> PointVector {
+        self.points.iter().map(|p| {
+            IkdTreePoint::from_vector3_f32(&p.pos)
+        }).collect()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.points.is_empty()
     }
-}
 
-pub type PointVector = Vec<PointXYZI>;
+    /// Save point cloud to a text file for debugging
+    pub fn save_to_txt(&self, path: &str) -> anyhow::Result<()> {
+        let mut content = String::new();
+        for p in &self.points {
+            content.push_str(&format!("{:.6} {:.6} {:.6} {:.6} {:.6}\n",
+                p.pos.x, p.pos.y, p.pos.z, p.intensity, p.timestamp));
+        }
+        std::fs::write(path, content)?;
+        Ok(())
+    }
+}
 
 /// IMU data structure
 /// 

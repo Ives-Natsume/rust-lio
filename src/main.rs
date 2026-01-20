@@ -1,7 +1,9 @@
 use flume;
 use rust_lio::utils::structs::MeasureGroup;
 use rust_lio::utils::logging;
+use rust_lio::frontend::sensor::sensor_init;
 use rust_lio::config::{CONFIG, read_config};
+use rust_lio::core::state::SlamContext;
 use std::thread;
 
 #[tokio::main]
@@ -12,27 +14,29 @@ async fn main() -> anyhow::Result<()> {
     let (tx, rx) = flume::unbounded::<MeasureGroup>();
 
     // Initialize and get the full SLAM context
-    let mut ctx = rust_lio::frontend::sensor::sensor_init(&CONFIG.get().unwrap().lidar).await?;
+    let mut ctx: SlamContext = sensor_init(&CONFIG.get().unwrap()).await?;
     
     tracing::info!("SLAM context initialized, IMU ready: {}", ctx.is_initialized());
     tracing::info!("Initial gravity estimate: {:?}", ctx.get_state().grav);
-
+    tracing::info!("Initial ikd_tree size: {}", ctx.ikd_tree.size());
     thread::spawn(move || {
         some_function(rx);
+        // ctx.process();
     });
 
     loop {
         // Use context's process_next for integrated processing
-        match ctx.process_next().await {
-            Ok(group) => {
-                if let Err(e) = tx.send(group) {
-                    tracing::error!("Failed to send packet to processing thread: {}", e);
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Processing error: {}", e);
-            }
-        }
+        // match ctx.process_next().await {
+        //     Ok(group) => {
+        //         if let Err(e) = tx.send(group) {
+        //             tracing::error!("Failed to send packet to processing thread: {}", e);
+        //         }
+        //     }
+        //     Err(e) => {
+        //         tracing::warn!("Processing error: {}", e);
+        //     }
+        // }
+        ctx.process().await;
     }
 }
 
