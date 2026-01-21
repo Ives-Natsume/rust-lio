@@ -87,10 +87,6 @@ impl SlamContext {
                 
                 // Get updated state
                 let state = self.kf.get_x();
-                tracing::debug!(
-                    "Updated pose: pos=[{:.3}, {:.3}, {:.3}]",
-                    state.pos[0], state.pos[1], state.pos[2]
-                );
                 
                 // ========== Update Local Map ==========
                 // Update FOV and remove out-of-range points

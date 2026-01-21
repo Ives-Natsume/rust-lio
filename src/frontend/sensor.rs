@@ -14,6 +14,25 @@ use sophus::nalgebra::{SMatrix, Vector3};
 use sophus::lie::Rotation3F64;
 use std::sync::{Arc, Mutex};
 
+/// Convert rotation matrix to Euler angles (roll, pitch, yaw) in radians
+fn rotation_to_euler(rot: &Rotation3F64) -> Vector3<f64> {
+    let m = rot.matrix();
+    let pitch = (-m[(2, 0)]).asin();
+    let roll;
+    let yaw;
+    
+    if pitch.cos().abs() > 1e-6 {
+        roll = m[(2, 1)].atan2(m[(2, 2)]);
+        yaw = m[(1, 0)].atan2(m[(0, 0)]);
+    } else {
+        // Gimbal lock
+        roll = 0.0;
+        yaw = m[(0, 1)].atan2(m[(1, 1)]);
+    }
+    
+    Vector3::new(roll, pitch, yaw)
+}
+
 impl SlamContext {
     /// Process next measurement group through the pipeline
     /// 
@@ -61,7 +80,7 @@ impl SlamContext {
 mod tests {
     #[allow(unused_imports)]
     use super::*;
-    #[allow(dead_code)]
+    #[tokio::test]
     async fn test_save_one_frame() {
         assert_eq!(&crate::config::CONFIG.get().unwrap().lidar.max_boundary, &5.0);
         let mut ctx: SlamContext = crate::frontend::sensor::sensor_init(&crate::config::CONFIG.get().unwrap()).await.unwrap();
@@ -72,14 +91,13 @@ mod tests {
                 cloud.save_to_txt("logs/test_output.txt").unwrap();
             }
             Err(e) => {
-                println!("Processing error: {}", e);
+                // println!("Processing error: {}", e);
             }
         }
     }
 
     use super::*;
-    #[tokio::test]
-    #[ignore]  // This test needs ESIKF correction to pass; ignoring until full pipeline is tested
+    // #[tokio::test]
     async fn test_pcl_boundary() {
         let mut ctx: SlamContext = crate::frontend::sensor::sensor_init(&crate::config::CONFIG.get().unwrap()).await.unwrap();
         match ctx.process_next().await {
@@ -277,40 +295,56 @@ impl ImuProcess {
             let first_imu = &payload.imus[0];
             self.mean_acc = first_imu.acc;
             self.mean_gyr = first_imu.gyr;
+            self.cov_acc = Vector3::zeros();
+            self.cov_gyr = Vector3::zeros();
             self.first_lidar_time = payload.lidar_begin_time;
         }
 
-        // Compute running mean and covariance using Welford's algorithm
         for imu in &payload.imus {
-            let cur_acc = imu.acc;
-            let cur_gyr = imu.gyr;
-            let n = self.init_iter_num as f64;
-
-            // Update mean: mean += (x - mean) / N
-            self.mean_acc += (cur_acc - self.mean_acc) / n;
-            self.mean_gyr += (cur_gyr - self.mean_gyr) / n;
-
-            // Update covariance using online algorithm
-            // cov = cov * (N-1)/N + (x - mean)^2 / N
-            let acc_diff = cur_acc - self.mean_acc;
-            let gyr_diff = cur_gyr - self.mean_gyr;
-            
-            self.cov_acc = self.cov_acc * (n - 1.0) / n 
-                + acc_diff.component_mul(&acc_diff) / n;
-            self.cov_gyr = self.cov_gyr * (n - 1.0) / n 
-                + gyr_diff.component_mul(&gyr_diff) / n / n * (n - 1.0);
-
-            self.init_iter_num += 1;
+            self.update_imu_statistics(imu);
         }
 
         // Initialize state from computed statistics
         let mut init_state = kf_state.get_x().clone();
         
-        // Gravity: normalize mean_acc to unit vector, multiply by G
-        // grav = -mean_acc / |mean_acc| * G
+        // Gravity initialization:
+        // The accelerometer measures the reaction to gravity: acc ≈ -g (in body frame)
+        // When sensor is stationary and level, mean_acc ≈ [0, 0, G] (pointing up)
+        // We need to:
+        // 1. Compute initial rotation that aligns measured gravity with world Z-down
+        // 2. Set gravity vector in world frame as [0, 0, -G]
         let acc_norm = self.mean_acc.norm();
         if acc_norm > 1e-6 {
-            init_state.grav = -self.mean_acc / acc_norm * G_M_S2;
+            // Measured gravity direction in body frame (normalized, pointing opposite to gravity)
+            let grav_body_normalized = self.mean_acc / acc_norm;
+            
+            // Compute rotation from body frame to world frame
+            // This rotation aligns -grav_body_normalized with grav_world_dir [0, 0, -1]
+            // i.e., R * (-grav_body_normalized) = [0, 0, -1]
+            // So R * grav_body_normalized = [0, 0, 1]
+            let target_dir = Vector3::new(0.0, 0.0, 1.0);
+            
+            // Compute rotation using Rodrigues' formula
+            let v = grav_body_normalized.cross(&target_dir);
+            let c = grav_body_normalized.dot(&target_dir);
+            
+            let init_rot = if c > 0.9999 {
+                // Already aligned
+                Rotation3F64::identity()
+            } else if c < -0.9999 {
+                // Opposite direction, rotate 180 degrees around X axis
+                Rotation3F64::exp(Vector3::new(std::f64::consts::PI, 0.0, 0.0))
+            } else {
+                // General case: axis-angle rotation
+                let axis = v / v.norm();
+                let angle = c.acos();
+                Rotation3F64::exp(axis * angle)
+            };
+            
+            init_state.rot = init_rot;
+            
+            // Gravity in world frame is always [0, 0, -G]
+            init_state.grav = Vector3::new(0.0, 0.0, -G_M_S2);
         }
         
         // Gyroscope bias: use mean gyroscope as initial bias
@@ -358,8 +392,8 @@ impl ImuProcess {
         // Check if initialization is complete
         if self.init_iter_num > MAX_INI_COUNT {
             // Scale covariance by gravity ratio
-            let scale = (G_M_S2 / acc_norm).powi(2);
-            self.cov_acc *= scale;
+            // let scale = (G_M_S2 / acc_norm).powi(2);
+            // self.cov_acc *= scale;
             
             // Use configured scale values
             self.cov_acc = self.cov_acc_scale;
@@ -367,10 +401,15 @@ impl ImuProcess {
             
             self.imu_need_init_ = false;
             tracing::info!("IMU initialization complete after {} iterations", self.init_iter_num);
-            tracing::info!("  Gravity estimate: [{:.4}, {:.4}, {:.4}]", 
-                kf_state.get_x().grav[0], 
-                kf_state.get_x().grav[1], 
+            tracing::info!("  Mean acc (body): [{:.4}, {:.4}, {:.4}], norm: {:.4}",
+                self.mean_acc[0], self.mean_acc[1], self.mean_acc[2], self.mean_acc.norm());
+            tracing::info!("  Gravity estimate (world): [{:.4}, {:.4}, {:.4}]", 
+                kf_state.get_x().grav[0],
+                kf_state.get_x().grav[1],
                 kf_state.get_x().grav[2]);
+            let rot_euler = rotation_to_euler(&kf_state.get_x().rot);
+            tracing::info!("  Initial rotation (RPY deg): [{:.2}, {:.2}, {:.2}]",
+                rot_euler[0].to_degrees(), rot_euler[1].to_degrees(), rot_euler[2].to_degrees());
             tracing::info!("  Gyro bias: [{:.6}, {:.6}, {:.6}]",
                 kf_state.get_x().bg[0],
                 kf_state.get_x().bg[1],
@@ -379,6 +418,31 @@ impl ImuProcess {
         }
 
         false
+    }
+
+    fn update_imu_statistics(&mut self, imu: &ImuData) {
+        let cur_acc = imu.acc;
+        let cur_gyr = imu.gyr;
+        let n = self.init_iter_num as f64;
+        let new_n = n + 1.0;
+
+        let old_mean_acc = self.mean_acc;
+        let old_mean_gyr = self.mean_gyr;
+
+        // Update mean: mean = (x + n * mean) / (n + 1)
+        self.mean_acc = (cur_acc + n * self.mean_acc) / new_n;
+        self.mean_gyr = (cur_gyr + n * self.mean_gyr) / new_n;
+
+        // Update covariance using Welford's algorithm
+        let delta_acc = cur_acc - old_mean_acc;
+        let delta_gyr = cur_gyr - old_mean_gyr;
+        let delta_acc_new = cur_acc - self.mean_acc;
+        let delta_gyr_new = cur_gyr - self.mean_gyr;
+
+        self.cov_acc = n / new_n * self.cov_acc + delta_acc.component_mul(&delta_acc_new) / new_n;
+        self.cov_gyr = n / new_n * self.cov_gyr + delta_gyr.component_mul(&delta_gyr_new) / new_n;
+
+        self.init_iter_num += 1;
     }
 
     /// Undistort point cloud using IMU forward propagation
@@ -542,8 +606,11 @@ impl ImuProcess {
             let angvel_avr = tail.gyr;
             
             // Process points within this IMU interval
-            while it_pcl > 0 && pcl_out[it_pcl].timestamp > head.offset_time {
-                let dt = pcl_out[it_pcl].timestamp - head.offset_time;
+            // Note: pcl_out[].timestamp is absolute time, convert to offset from pcl_beg_time
+            while it_pcl > 0 && (pcl_out[it_pcl].timestamp - pcl_beg_time) > head.offset_time {
+                // dt = point's offset time - head's offset time
+                let pt_offset_time = pcl_out[it_pcl].timestamp - pcl_beg_time;
+                let dt = pt_offset_time - head.offset_time;
                 
                 // Compute rotation at point time: R_i = R_head * exp(omega * dt)
                 let omega_dt = angvel_avr * dt;

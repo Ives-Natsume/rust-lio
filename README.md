@@ -2,6 +2,6 @@
 
 under construction
 
-## Usage
+## Known Issues
 
- - Modify the gravity vector in `src/core/math/use_ikfoam.rs` if needed.
+ - Gravity estimate, current code assumes IMU is roughly level during initialization.
