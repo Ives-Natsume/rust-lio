@@ -39,13 +39,13 @@ impl SlamContext {
                     return;
                 }
                 
-                tracing::info!("Processing scan with {} undistorted points", feats_undistort.len());
+                // tracing::info!("Processing scan with {} undistorted points", feats_undistort.len());
                 
                 // Downsample point cloud
                 let feats_down_body = voxel_downsample(&feats_undistort, VOXEL_FILTER_SIZE);
                 let feats_down_size = feats_down_body.len();
                 
-                tracing::debug!("After downsampling: {} points", feats_down_size);
+                // tracing::debug!("After downsampling: {} points", feats_down_size);
                 
                 if feats_down_size < MIN_POINTS_FOR_UPDATE {
                     tracing::warn!("Too few points after downsampling: {}", feats_down_size);
@@ -84,9 +84,6 @@ impl SlamContext {
                     tracing::warn!("ESIKF update failed");
                     return;
                 }
-                
-                // Get updated state
-                let state = self.kf.get_x();
                 
                 // ========== Update Local Map ==========
                 // Update FOV and remove out-of-range points
@@ -247,4 +244,25 @@ fn voxel_downsample(points: &PointVector, voxel_size: f64) -> PointVector {
     }
     
     voxel_map.into_values().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_longtime_run() {
+        let mut ctx: SlamContext = crate::frontend::sensor::sensor_init(&crate::config::CONFIG.get().unwrap()).await.unwrap();
+        for i in 0..50 {
+            ctx.process().await;
+            if i == 0 {
+                ctx.ikd_tree.export_tree_to_txt("logs/test_longtime_run_tree_start.txt").await.unwrap();
+                println!("Initial tree exported.");
+            }
+            if i == 49 {
+                ctx.ikd_tree.export_tree_to_txt("logs/test_longtime_run_tree_end.txt").await.unwrap();
+                println!("Final tree exported.");
+            }
+        }
+    }
 }

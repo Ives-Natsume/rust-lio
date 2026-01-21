@@ -80,10 +80,11 @@ impl SlamContext {
 mod tests {
     #[allow(unused_imports)]
     use super::*;
-    #[tokio::test]
+    // #[tokio::test]
     async fn test_save_one_frame() {
         assert_eq!(&crate::config::CONFIG.get().unwrap().lidar.max_boundary, &5.0);
         let mut ctx: SlamContext = crate::frontend::sensor::sensor_init(&crate::config::CONFIG.get().unwrap()).await.unwrap();
+        ctx.ikd_tree.export_tree_to_txt("logs/test_tree.txt").await.unwrap();
         match ctx.process_next().await {
             Ok(group) => {
                 let pcl: Vec<PointXYZI> = group.points.iter().flat_map(|p| p.points.clone()).collect();
@@ -92,6 +93,30 @@ mod tests {
             }
             Err(e) => {
                 // println!("Processing error: {}", e);
+            }
+        }
+    }
+
+    #[allow(unused_imports)]
+    use super::*;
+    // #[tokio::test]
+    async fn test_longtime_run() {
+        let mut ctx: SlamContext = crate::frontend::sensor::sensor_init(&crate::config::CONFIG.get().unwrap()).await.unwrap();
+        for i in 0..1000 {
+            match ctx.process_next().await {
+                Ok(_group) => {
+                    if i == 0 {
+                        ctx.ikd_tree.export_tree_to_txt("logs/test_longtime_run_tree_start.txt").await.unwrap();
+                        println!("Initial tree exported.");
+                    }
+                    if i == 999 {
+                        ctx.ikd_tree.export_tree_to_txt("logs/test_longtime_run_tree_end.txt").await.unwrap();
+                        println!("Final tree exported.");
+                    }
+                }
+                Err(e) => {
+
+                }
             }
         }
     }

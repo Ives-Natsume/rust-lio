@@ -1413,6 +1413,22 @@ impl IkdTree {
     }
 }
 
+impl IkdTree {
+    /// Export the tree structure to text file
+    pub async fn export_tree_to_txt(&self, file_path: &str) -> anyhow::Result<(), std::io::Error> {
+        let all_points = self.flatten_all();
+        let mut file = tokio::fs::File::create(file_path).await.unwrap();
+        for point in all_points {
+            let line = format!("{:.6} {:.6} {:.6}\n", point.x, point.y, point.z);
+            match tokio::io::AsyncWriteExt::write_all(&mut file, line.as_bytes()).await {
+                Ok(_) => {},
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
