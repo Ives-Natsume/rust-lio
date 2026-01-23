@@ -60,7 +60,15 @@ impl SlamContext {
             }
         }
 
-        tracing::debug!("Estimated Position: {:?}", self.kf.get_x().pos);
+        let estimated_position = self.kf.get_x().pos;
+        let estimated_rotation = self.kf.get_x().rot;
+        tracing::debug!(
+            "Estimated position: [{:.2}, {:.2}, {:.2}], rotation (RPY deg): [{:.2}, {:.2}, {:.2}]",
+            estimated_position[0], estimated_position[1], estimated_position[2],
+            rotation_to_euler(&estimated_rotation)[0].to_degrees(),
+            rotation_to_euler(&estimated_rotation)[1].to_degrees(),
+            rotation_to_euler(&estimated_rotation)[2].to_degrees(),
+        );
         
         Ok(group)
     }

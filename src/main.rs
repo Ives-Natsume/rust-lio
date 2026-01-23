@@ -18,25 +18,17 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("SLAM context initialized, IMU ready: {}", ctx.is_initialized());
     tracing::info!("Initial gravity estimate: {:?}", ctx.get_state().grav);
     tracing::info!("Initial ikd_tree size: {}", ctx.ikd_tree.size());
-    // thread::spawn(move || {
-    //     some_function(rx);
-    //     // ctx.process();
-    // });
 
-    loop {
-        // Use context's process_next for integrated processing
-        // match ctx.process_next().await {
-        //     Ok(group) => {
-        //         if let Err(e) = tx.send(group) {
-        //             tracing::error!("Failed to send packet to processing thread: {}", e);
-        //         }
-        //     }
-        //     Err(e) => {
-        //         tracing::warn!("Processing error: {}", e);
-        //     }
-        // }
+    use tokio::time::{Duration};
+    let run_duration = Duration::from_secs(20);
+    let now = tokio::time::Instant::now();
+    while tokio::time::Instant::now() - now < run_duration {
         ctx.process().await;
     }
+
+    ctx.ikd_tree.export_tree_to_txt("logs/long_run_tree.txt").await.unwrap();
+    
+    Ok(())
 }
 
 /// Test only
