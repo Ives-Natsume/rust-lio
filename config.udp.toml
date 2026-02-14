@@ -1,7 +1,7 @@
 # Configuration for UDP Mode (ROS Bag Replay)
 # 使用Python脚本将ROS bag转换为UDP流
 
-log_level = "debug"
+log_level = "info"
 
 [lidar]
 # 使用UDP模式接收数据
@@ -22,4 +22,4 @@ dataset_fps = 10.0
 [ikd_tree]
 delete_criterion_param = 0.5
 balance_criterion_param = 0.6
-downsample_size = 0.05
+downsample_size = 0.1

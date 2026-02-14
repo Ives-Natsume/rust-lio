@@ -1,0 +1,21 @@
+# Configuration for Park Dataset Mode
+# Copy this to config.toml to test with park dataset
+
+log_level = "info"
+
+[lidar]
+# Use "Dataset" mode to playback offline data
+data_source = "Dataset"
+frame_time = 100  # Not used in dataset mode
+lidar_bind_addr = "0.0.0.0:56301"  # Not used in dataset mode
+imu_bind_addr = "0.0.0.0:56401"  # Not used in dataset mode
+max_boundary = 50.0  # Park dataset has larger range
+
+# Dataset mode settings
+dataset_path = "reference/dataset/park"
+dataset_fps = 10.0  # MID360 typical rate (10Hz)
+
+[ikd_tree]
+delete_criterion_param = 0.5
+balance_criterion_param = 0.6
+downsample_size = 0.1  # Park dataset may need larger downsample size

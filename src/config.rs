@@ -5,6 +5,7 @@ use serde::{Serialize, Deserialize};
 pub enum DataSource {
     Udp,
     Ros,
+    Dataset,  // Offline dataset playback
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,6 +15,18 @@ pub struct LidarConfig {
     pub lidar_bind_addr: String,
     pub imu_bind_addr: String,
     pub max_boundary: f64,          // LIDAR point max distance boundary
+    #[serde(default = "default_dataset_path")]
+    pub dataset_path: String,       // Path to dataset directory (for Dataset mode)
+    #[serde(default = "default_dataset_fps")]
+    pub dataset_fps: f64,           // Dataset playback FPS (for Dataset mode)
+}
+
+fn default_dataset_path() -> String {
+    "reference/dataset/park".to_string()
+}
+
+fn default_dataset_fps() -> f64 {
+    10.0  // MID360 typical rate
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +59,8 @@ pub fn read_config() -> anyhow::Result<()> {
                     lidar_bind_addr: "0.0.0.0:56301".to_string(),
                     imu_bind_addr: "0.0.0.0:56401".to_string(),
                     max_boundary: 5.0,
+                    dataset_path: default_dataset_path(),
+                    dataset_fps: default_dataset_fps(),
                 },
                 ikd_tree: IkdTreeConfig {
                     delete_criterion_param: 0.5,

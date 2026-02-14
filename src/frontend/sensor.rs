@@ -1,9 +1,8 @@
-//! Sensor initialization
-//! 
 //! For MID360 only
 use crate::{
     config::AppConfig,
     io::lidar_driver::*,
+    io::dataset_adapter::ParkDatasetBridge,
     utils::structs::{ImuData, ImuPose, ImuProcess, PointCloudXYZI, PointXYZI}
 };
 use crate::utils::structs::MeasureGroup;
@@ -214,6 +213,14 @@ pub async fn sensor_init(config: &AppConfig) -> anyhow::Result<SlamContext> {
         crate::config::DataSource::Ros => {
             unimplemented!("ROS data source is not implemented yet");
         }
+        crate::config::DataSource::Dataset => {
+            let bridge = ParkDatasetBridge::new(
+                &config.lidar.dataset_path,
+                config.lidar.dataset_fps,
+            )?;
+            arc_bridge = Arc::new(Mutex::new(bridge));
+            tracing::info!("Using park dataset from: {}", config.lidar.dataset_path);
+        }
     }
 
     // time synchronization test
@@ -269,8 +276,20 @@ pub async fn sensor_init(config: &AppConfig) -> anyhow::Result<SlamContext> {
             p.to_point_vector()
         }).collect();
         tracing::info!("Building initial ikd-tree with {} points", new_scan.len());
-        // sensor keep still during imu initialization, so no undistortion needed
-        ikd_tree.add_points(&new_scan, true);
+        
+        // undistort point cloud before building tree
+        let mut undistort_group = group.clone();
+        match imu_processor.undistort_pcl(&mut undistort_group, &mut kf) {
+            Ok(_) => {
+                tracing::info!("Initial point cloud undistorted successfully");
+            }
+            Err(e) => {
+                tracing::warn!("Initial point cloud undistortion failed: {}", e);
+            }
+        }
+
+        // ikd_tree.add_points(&new_scan, true);
+        ikd_tree.add_points(&undistort_group.points.iter().flat_map(|p| p.to_point_vector()).collect(), true);
 
     }
 
@@ -500,6 +519,8 @@ impl ImuProcess {
     ) -> anyhow::Result<()> {
         // Build IMU queue: prepend last IMU from previous frame
         let mut v_imu: Vec<ImuData> = Vec::with_capacity(payload.imus.len() + 1);
+
+        // Some(ref n) borrows the value and origin value could be used after current scope
         if let Some(ref last) = self.last_imu {
             v_imu.push(last.clone());
         }
@@ -550,7 +571,7 @@ impl ImuProcess {
                 continue;
             }
             
-            // Midpoint integration for angular velocity and acceleration
+            // midpoint integration
             let angvel_avr = (head.gyr + tail.gyr) * 0.5;
             let acc_avr_raw = (head.acc + tail.acc) * 0.5;
 
@@ -603,10 +624,6 @@ impl ImuProcess {
                 imu_state.pos,
                 rot_matrix,
             ));
-            // tracing::debug!("IMU pose at t={:.6}s: pos=[{:.4}, {:.4}, {:.4}], vel=[{:.4}, {:.4}, {:.4}]",
-            //     offset_t,
-            //     imu_state.pos[0], imu_state.pos[1], imu_state.pos[2],
-            //     imu_state.vel[0], imu_state.vel[1], imu_state.vel[2]);
         }
         
         // Propagate to lidar end time

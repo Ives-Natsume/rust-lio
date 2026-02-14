@@ -19,17 +19,21 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Initial gravity estimate: {:?}", ctx.get_state().grav);
     tracing::info!("Initial ikd_tree size: {}", ctx.ikd_tree.size());
 
-    use tokio::time::{Duration};
-    let run_duration = Duration::from_secs(20);
-    let now = tokio::time::Instant::now();
+    // use tokio::time::{Duration};
+    // let run_duration = Duration::from_secs(60);
+    // let now = tokio::time::Instant::now();
     let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
     let target: std::net::SocketAddr = "127.0.0.1:9000".parse()?;
-    while tokio::time::Instant::now() - now < run_duration {
+    // while tokio::time::Instant::now() - now < run_duration {
+    //     ctx.process().await;
+    //     ctx.publish_state_udp(&socket, target).await?;
+    // }
+    loop {
         ctx.process().await;
         ctx.publish_state_udp(&socket, target).await?;
     }
 
-    ctx.ikd_tree.export_tree_to_txt("logs/long_run_tree.txt").await.unwrap();
+    // ctx.ikd_tree.export_tree_to_txt("logs/long_run_tree.txt").await.unwrap();
     
     Ok(())
 }
